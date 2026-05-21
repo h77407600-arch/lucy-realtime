@@ -85,3 +85,4 @@ If you want, I can also:
 - Convert the UI to Tailwind
 
 Tell me which next step you'd like me to do.
+# lucy-realtime
