@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "builds": [
+    { "src": "package.json", "use": "@vercel/next" }
+  ],
+  "env": {
+    "DECART_API_KEY": "@decart_api_key"
+  }
+}

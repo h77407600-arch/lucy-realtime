@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Lucy Realtime</title>
+</head>
+<body>
+
+<h1>Lucy AI Realtime</h1>
+
+<video id="output" autoplay playsinline></video>
+
+<script type="module">
+import { createDecartClient, models }
+from "https://esm.sh/@decartai/sdk";
+
+const model = models.realtime("lucy-latest");
+
+const stream = await navigator.mediaDevices.getUserMedia({
+  video: {
+    frameRate: model.fps,
+    width: model.width,
+    height: model.height
+  },
+  audio: true
+});
+
+const client = createDecartClient({
+  apiKey: "YOUR_DECART_API_KEY"
+});
+
+await client.realtime.connect(stream, {
+  model,
+
+  onRemoteStream: (remoteStream) => {
+    document.getElementById("output").srcObject = remoteStream;
+  },
+
+  initialState: {
+    prompt: {
+      text: "Substitute the character with an anime hero with glowing eyes.",
+      enhance: true
+    }
+  }
+});
+</script>
+
+</body>
+</html>
