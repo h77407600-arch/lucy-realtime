@@ -6,3 +6,6 @@ dist
 build
 /.vercel
 *.log
+.codex*.log
+.vercel
+.env*.local

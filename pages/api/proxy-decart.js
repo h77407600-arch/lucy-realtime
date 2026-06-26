@@ -1,59 +1,94 @@
-const RATE_LIMIT_WINDOW_MS = parseInt(process.env.RATE_LIMIT_WINDOW_MS || '3600000', 10) // 1 hour
-const RATE_LIMIT_MAX = parseInt(process.env.RATE_LIMIT_MAX || '60', 10) // 60 requests per window
+import { hasValidSession } from "../../lib/auth.mjs";
+import { applyRateLimitHeaders, enforceRateLimit } from "../../lib/rate-limit.mjs";
+import { validateProxyPayload } from "../../lib/request-validation.mjs";
+import { getHealthState, getServerConfig } from "../../lib/server-config.mjs";
 
-// In-memory store (per serverless instance). Not durable — use Redis for production.
-const ipStore = new Map()
+export const config = {
+  api: {
+    bodyParser: {
+      sizeLimit: "8mb",
+    },
+  },
+};
 
-function getIp(req){
-  return req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown'
+async function readJsonResponse(response) {
+  const raw = await response.text();
+  if (!raw) return null;
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return { detail: raw };
+  }
 }
 
-export default async function handler(req, res){
-  if(req.method !== 'POST') return res.status(405).json({error:'Method not allowed'})
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
 
-  const key = process.env.DECART_API_KEY
-  if(!key) return res.status(500).json({error:'Missing DECART_API_KEY on server'})
-
-  // Optional simple token check (use REQUIRE_APP_TOKEN=true and set APP_TOKEN in env to enable)
-  const requireToken = process.env.REQUIRE_APP_TOKEN === 'true'
-  if(requireToken){
-    const provided = req.headers['x-app-token'] || ''
-    if(!process.env.APP_TOKEN || provided !== process.env.APP_TOKEN){
-      return res.status(401).json({error:'Unauthorized - invalid app token'})
-    }
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed." });
   }
 
-  // Rate limiting by IP
-  const ip = getIp(req)
-  const now = Date.now()
-  const entry = ipStore.get(ip) || {count:0, windowStart: now}
-  if(now - entry.windowStart > RATE_LIMIT_WINDOW_MS){
-    entry.count = 0
-    entry.windowStart = now
-  }
-  entry.count += 1
-  ipStore.set(ip, entry)
-  if(entry.count > RATE_LIMIT_MAX){
-    return res.status(429).json({error:'Rate limit exceeded'})
+  const health = getHealthState();
+  if (!health.checks.decartConfigured) {
+    return res.status(500).json({ error: "Missing DECART_API_KEY on the server." });
   }
 
-  // Forward the request body to Decart's API.
-  const decartUrl = process.env.DECART_API_URL || 'https://api.decart.ai/v1/transform'
+  if (!health.checks.authConfigured) {
+    return res.status(500).json({ error: "Authentication is not configured on the server." });
+  }
 
-  try{
-    const decartRes = await fetch(decartUrl, {
-      method: 'POST',
+  if (!hasValidSession(req)) {
+    return res.status(401).json({ error: "Authentication required." });
+  }
+
+  const rateLimit = await enforceRateLimit(req, "proxy");
+  applyRateLimitHeaders(res, rateLimit);
+  if (!rateLimit.ok) {
+    return res.status(rateLimit.status || 429).json({ error: rateLimit.error || "Rate limit exceeded." });
+  }
+
+  const serverConfig = getServerConfig();
+  const validation = validateProxyPayload(req.body, {
+    maxImageBytes: serverConfig.maxImageBytes,
+    maxPromptLength: serverConfig.maxPromptLength,
+  });
+
+  if (!validation.ok) {
+    return res.status(validation.status).json({ error: validation.error });
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), serverConfig.decartTimeoutMs);
+
+  try {
+    const upstreamResponse = await fetch(serverConfig.decartUrl, {
+      method: "POST",
       headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${key}`
+        Authorization: `Bearer ${serverConfig.decartApiKey}`,
+        "Content-Type": "application/json",
       },
-      body: JSON.stringify(req.body)
-    })
+      body: JSON.stringify(validation.value),
+      signal: controller.signal,
+    });
 
-    const data = await decartRes.json()
-    return res.status(decartRes.status).json(data)
-  }catch(err){
-    console.error('proxy error', err)
-    return res.status(500).json({error: err.message})
+    const payload = await readJsonResponse(upstreamResponse);
+
+    if (!upstreamResponse.ok) {
+      return res.status(upstreamResponse.status).json({
+        error: "Decart request failed.",
+        upstream: payload,
+      });
+    }
+
+    return res.status(200).json(payload);
+  } catch (error) {
+    const isAbort = error?.name === "AbortError";
+    return res.status(isAbort ? 504 : 500).json({
+      error: isAbort ? "Decart request timed out." : "Unexpected proxy failure.",
+      detail: error?.message || "Unknown error",
+    });
+  } finally {
+    clearTimeout(timeout);
   }
 }

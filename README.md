@@ -1,88 +1,137 @@
-# Lucy Realtime — Secure Production Deployment (Next.js)
+# Lucy Realtime
 
-This repo includes a minimal Next.js setup and a secure API proxy to avoid exposing your Decart API key in the browser.
+This project is now set up as a hardened production baseline for a private Decart-powered realtime webcam app on Next.js and Vercel.
 
-Quick summary:
-- Local dev: `npm run dev` (Next.js)
-- Build: `npm run build`
-- Start (production): `npm start`
-- Secure proxy: `pages/api/proxy-decart.js` (reads `DECART_API_KEY`)
+What is built in:
 
-Local testing
+- Server-side Decart proxy and short-lived realtime client tokens so the API key never reaches the browser
+- Signed HttpOnly session cookie auth backed by `APP_ACCESS_PASSWORD`
+- Redis-backed rate limiting in production via Upstash
+- Realtime Lucy `lucy-2.1` browser streaming with 16:9 camera constraints
+- Request validation, payload size limits, and upstream timeout handling for the fallback proxy
+- Health endpoint for deployment checks: `/api/health`
 
-1. Install deps:
+## Production Requirements
+
+Set these environment variables in Vercel Project Settings or with `vercel env add`:
+
+```bash
+DECART_API_KEY=...
+DECART_API_URL=https://api.decart.ai/v1/transform
+DECART_REALTIME_MODEL=lucy-2.1
+DECART_TOKEN_EXPIRES_SECONDS=300
+DECART_MAX_SESSION_SECONDS=600
+DECART_ALLOWED_ORIGINS=https://your-domain.example
+APP_ACCESS_PASSWORD=use-a-long-random-access-code
+SESSION_SECRET=use-a-32-byte-or-longer-random-secret
+SESSION_TTL_HOURS=8
+DECART_TIMEOUT_MS=15000
+MAX_IMAGE_BYTES=3145728
+MAX_PROMPT_LENGTH=500
+PROXY_RATE_LIMIT_MAX=20
+PROXY_RATE_LIMIT_WINDOW=1 m
+TOKEN_RATE_LIMIT_MAX=10
+TOKEN_RATE_LIMIT_WINDOW=1 m
+LOGIN_RATE_LIMIT_MAX=5
+LOGIN_RATE_LIMIT_WINDOW=10 m
+UPSTASH_REDIS_REST_URL=...
+UPSTASH_REDIS_REST_TOKEN=...
+```
+
+Notes:
+
+- `APP_ACCESS_PASSWORD` is a shared access gate for this deployment. It is appropriate for a restricted/private app. For a public multi-user product, replace this with full user auth.
+- `SESSION_SECRET` should be at least 32 characters and kept server-side only.
+- `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for production rate limiting.
+- `DECART_ALLOWED_ORIGINS` should include your production origin so browser realtime tokens are origin-scoped.
+- Do not put secrets in `NEXT_PUBLIC_*` variables.
+
+## Local Development
+
+1. Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Run dev server:
+2. Create `.env.local` from `.env.example`.
+
+3. Start the app:
 
 ```bash
 npm run dev
 ```
 
-3. Open http://localhost:3000 and allow camera access. Use the Capture button to send a frame to the server API route.
+4. Open [http://localhost:3000](http://localhost:3000), sign in with `APP_ACCESS_PASSWORD`, allow camera access, then start realtime.
 
-Security notes (do NOT deploy with a client-side API key)
+Local development can fall back to in-memory rate limiting if Upstash is not configured. Production will reject requests until Upstash Redis is configured.
 
-- Keep your `DECART_API_KEY` out of the frontend. Set it in Vercel or in `./.env.local` for local development (never commit `.env.local`).
-- The frontend calls `/api/proxy-decart` which forwards the request server-side with the secret key.
-- Add auth, rate limits, and usage quotas before public launch.
+## Verification
 
-Deploying to GitHub + Vercel
+Run the test and build gates before deploying:
 
-1. Create a GitHub repo named `lucy-realtime`.
-2. Push your code (see the user's original steps: `git init`, `git add .`, `git commit -m "Initial Lucy realtime app"`, `git remote add origin ...`, `git push -u origin main`).
-3. In Vercel: import the project from GitHub, set the following environment variables in the Vercel dashboard:
-
-   - `DECART_API_KEY` = your secret key
-   - `DECART_API_URL` (optional)
-
-4. Deploy. Vercel will build and host the Next.js app and the serverless API route.
-
-Recommended production upgrades
-
-- Add authentication (Clerk or Auth.js), usage tracking, and billing (Stripe).
-- Enforce rate limits and per-user quotas server-side.
-- Move long-running or heavy workloads to a separate backend or queued worker with GPU access.
-
-Files added
-
-- `pages/index.js` — minimal webcam UI and capture
-- `pages/api/proxy-decart.js` — server-side proxy to Decart
-- `.gitignore`, `vercel.json` — deployment helpers
-
-Environment
-
-Local: create a `.env.local` with:
-
-```
-DECART_API_KEY=sk_...
-DECART_API_URL=https://api.decart.ai/v1/transform
-# Optional protection
-REQUIRE_APP_TOKEN=true
-APP_TOKEN=some-secret-token
-NEXT_PUBLIC_APP_TOKEN=some-secret-token
-# Rate limits
-RATE_LIMIT_WINDOW_MS=3600000
-RATE_LIMIT_MAX=60
+```bash
+npm test
+npm run build
+npm audit --omit=dev
 ```
 
-Important notes:
+Check deployment health:
 
-- `DECART_API_KEY` must stay server-side and never be committed.
-- `REQUIRE_APP_TOKEN=true` enables a simple token gate on the API route.
-- `NEXT_PUBLIC_APP_TOKEN` is only for development convenience and is visible in client builds; do not treat it as a secret in production.
-- `RATE_LIMIT_WINDOW_MS` and `RATE_LIMIT_MAX` control the per-IP window and request cap.
-- In-memory rate limiting is not durable across serverless instances; use Redis or another shared store for production.
+```bash
+curl https://your-deployment-url/api/health
+npm run verify:health -- https://your-deployment-url
+```
 
-Never commit secrets.
+Expected behavior:
 
-If you want, I can also:
-- Add an authentication layer to the API route
-- Add rate-limiting middleware
-- Convert the UI to Tailwind
+- `200 OK` when auth, Decart, and rate-limit requirements are configured
+- `503` when the deployment is missing required production configuration
 
-Tell me which next step you'd like me to do.
-# lucy-realtime
+## Deploying on Vercel
+
+Vercel detects Next.js automatically, so the repo uses a minimal `vercel.json` with only function duration overrides.
+
+For a step-by-step deployment checklist, see [DEPLOYMENT.md](/C:/Users/Sfafa/lucy-realtime/DEPLOYMENT.md).
+
+Recommended setup:
+
+1. Link the project or import it in Vercel.
+2. Add the required environment variables in Project Settings.
+3. Pull the environment locally when needed:
+
+```bash
+vercel env pull .env.local --yes
+```
+
+4. Deploy after `npm test` and `npm run build` pass.
+
+Before a real production deploy, you can verify the required secret/env shape locally:
+
+```bash
+npm run verify:production-config
+```
+
+For a single release gate that mirrors CI:
+
+```bash
+npm run verify:release
+```
+
+## Security Model
+
+- Browser requests never receive the Decart secret; they receive short-lived Decart client tokens after session auth.
+- Authenticated access is enforced in the API route, not only in frontend code.
+- Session cookies are `HttpOnly`, `SameSite=Strict`, and `Secure` in production.
+- Requests are validated before proxying upstream.
+- Upstream calls are time-boxed to avoid hanging serverless invocations.
+- CI now enforces test, build, and production dependency audit checks on pushes and pull requests.
+
+## API Routes
+
+- `/api/auth/login` — exchange `APP_ACCESS_PASSWORD` for a signed session cookie
+- `/api/auth/logout` — clear the current session
+- `/api/auth/session` — check whether the current session is authenticated
+- `/api/decart-token` — create a short-lived, model-scoped Decart realtime client token
+- `/api/proxy-decart` — authenticated image transform proxy
+- `/api/health` — deployment readiness endpoint
